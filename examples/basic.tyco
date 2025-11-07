@@ -1,0 +1,24 @@
+# Basic Tyco example
+str environment: production
+bool debug: false
+int port: 8080
+
+# Database configuration
+Database:
+ *str name:
+  str host:
+  int port:
+  str connection_string:
+  - primary, localhost, 5432, postgresql://localhost:5432/myapp
+  - replica, replica-host, 5432, postgresql://replica-host:5432/myapp
+
+# Server configuration
+Server:
+ *str name:
+  int port:
+  str host:
+ ?str description:
+  Database database:
+  - web1, 8080, web1.example.com, "Primary web server", Database(primary)
+  - api1, 3000, api1.example.com, null, Database(primary)
+  - worker1, 9000, worker1.example.com, "Background worker", Database(replica)
