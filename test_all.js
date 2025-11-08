@@ -32,10 +32,23 @@ for (const inputFile of inputFiles) {
     const result = load(inputPath);
     const actual = JSON.stringify(result, null, 2);
     const expected = fs.readFileSync(expectedPath, 'utf8').trim();
+
+    const normalize = value => {
+      if (Array.isArray(value)) {
+        return value.map(normalize);
+      }
+      if (value && typeof value === 'object') {
+        const sorted = {};
+        for (const key of Object.keys(value).sort()) {
+          sorted[key] = normalize(value[key]);
+        }
+        return sorted;
+      }
+      return value;
+    };
     
-    // Normalize JSON for comparison (handles 0 vs 0.0, whitespace, etc.)
-    const actualObj = JSON.parse(actual);
-    const expectedObj = JSON.parse(expected);
+    const actualObj = normalize(JSON.parse(actual));
+    const expectedObj = normalize(JSON.parse(expected));
     const actualNorm = JSON.stringify(actualObj, null, 2);
     const expectedNorm = JSON.stringify(expectedObj, null, 2);
     

@@ -3,7 +3,8 @@
  * Main entry point for the Tyco configuration language parser
  */
 
-export { load, loads, TycoContext, TycoLexer, TycoStruct, TycoInstance, TycoValue, TycoArray, TycoReference } from './parser-new';
+export { TycoParser, load, loads } from './parser';
+export { TycoContext, TycoLexer, TycoStruct, TycoInstance, TycoValue, TycoArray, TycoReference } from './parser';
 
 // Default export for convenience
-export { load as default } from './parser-new';
+export { load as default } from './parser';

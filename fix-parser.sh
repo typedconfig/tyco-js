@@ -1,5 +1,5 @@
 #!/bin/bash
-# Apply sed fixes for TypeScript strict mode errors in parser-new.ts
+# Apply sed fixes for TypeScript strict mode errors in parser.ts
 
 sed -i '
 # Fix line 63 - comment undefined check
@@ -21,4 +21,4 @@ s/\(path\.isAbsolute(\)\(includePath\)\()\)/\1\2!\3/g
 
 # Fix split()[1] undefined issues
 s/\.split.*\[1\]\./\.split.*[1]!./g
-' src/parser-new.ts
+' src/parser.ts
