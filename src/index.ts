@@ -1,13 +1,9 @@
 /**
- * Tyco JavaScript Parser
+ * Tyco JavaScript/TypeScript Parser
  * Main entry point for the Tyco configuration language parser
  */
 
-export { TycoParser, load, loads } from './parser';
-export { TycoContext } from './context';
-export { TycoLexer } from './lexer';
-export { TycoValue, TycoArray, TycoReference, TycoInstance } from './values';
-export * from './types';
+export { load, loads, TycoContext, TycoLexer, TycoStruct, TycoInstance, TycoValue, TycoArray, TycoReference } from './parser-new';
 
 // Default export for convenience
-export { load as default } from './parser';
+export { load as default } from './parser-new';
