@@ -9,6 +9,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { TycoParserOptions } from './types';
+import { TycoError, SourceLocation } from './errors';
+import { SourceFragment, coerceContentToFragments } from './source';
 
 const EOL = os.EOL;
 
@@ -99,22 +101,53 @@ function normalizeDateTimeLiteral(value: string): string {
   return `${normalized}${tz}`;
 }
 
-function stripComments(line: string): string {
-  const parts = line.split('#', 2);
-  const content = parts[0];
-  if (parts.length > 1) {
-    const comment = parts[1]!.replace(/\r?\n$/, '');
-    for (const char of comment) {
+function stripComments(line: SourceFragment | string): string {
+  const raw = typeof line === 'string' ? line : line.text;
+  const hashIndex = raw.indexOf('#');
+  const content = hashIndex === -1 ? raw : raw.slice(0, hashIndex);
+  if (hashIndex !== -1) {
+    const commentText = raw.slice(hashIndex + 1).replace(/\r?\n$/, '');
+    for (let idx = 0; idx < commentText.length; idx += 1) {
+      const char = commentText.charAt(idx);
       if (ILLEGAL_STR_CHARS.has(char)) {
-        throw new Error(`Invalid characters in comments: ${char}`);
+        const fragment = typeof line === 'string' ? undefined : line.slice(hashIndex + 1 + idx);
+        raiseParseError(`Invalid characters in comments: ${char}`, fragment);
       }
     }
   }
-  return content!.trimEnd();
+  return content.trimEnd();
 }
 
 function isWhitespace(content: string): boolean {
   return /^\s*$/.test(content);
+}
+
+function raiseParseError(message: string, fragment?: SourceFragment | null, overrides: Partial<SourceLocation> = {}): never {
+  const location: SourceLocation = { ...overrides };
+  if (fragment) {
+    if (location.source === undefined) location.source = fragment.source;
+    if (location.row === undefined) location.row = fragment.row;
+    if (location.column === undefined) location.column = fragment.column;
+    if (location.lineText === undefined) location.lineText = fragment.lineText ?? fragment.text.replace(/\r?\n$/, '');
+  }
+  throw new TycoError(message, location);
+}
+
+function fragmentFrom(target: { fragment?: SourceFragment | null; parent?: any } | null | undefined): SourceFragment | null {
+  if (!target) {
+    return null;
+  }
+  if (target.fragment) {
+    return target.fragment;
+  }
+  if (target.parent && target.parent.fragment) {
+    return target.parent.fragment;
+  }
+  return null;
+}
+
+function failWithFragment(target: { fragment?: SourceFragment | null; parent?: any } | null | undefined, message: string): never {
+  raiseParseError(message, fragmentFrom(target));
 }
 
 // ============================================================================
@@ -130,29 +163,27 @@ class TycoLexer {
   private static STRUCT_INSTANCE_REGEX = /^\s+-/;
 
   private context: TycoContext;
-  private lines: string[];
+  private lines: SourceFragment[];
   private path: string | null;
-  private numLines: number;
   private defaults: Map<string, Map<string, any>>;
 
-  constructor(context: TycoContext, lines: string[], path: string | null = null) {
+  constructor(context: TycoContext, lines: SourceFragment[], path: string | null = null) {
     this.context = context;
     this.lines = lines;
     this.path = path;
-    this.numLines = lines.length;
     this.defaults = new Map();
   }
 
   static fromPath(context: TycoContext, filePath: string): TycoLexer {
     if (!context.pathCache.has(filePath)) {
       if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-        throw new Error(`Can only load path if is a regular file: ${filePath}`);
+        raiseParseError(`Can only load path if is a regular file: ${filePath}`, null, { source: filePath });
       }
       
       const content = fs.readFileSync(filePath, 'utf-8');
-      const lines = content.split(/\r?\n/).map(line => line.endsWith('\n') ? line : line + EOL);
+      const fragments = coerceContentToFragments(content, filePath);
       
-      const lexer = new TycoLexer(context, lines, filePath);
+      const lexer = new TycoLexer(context, fragments, filePath);
       lexer.process();
       context.pathCache.set(filePath, lexer);
     }
@@ -164,7 +195,7 @@ class TycoLexer {
       const line = this.lines.shift()!;
       
       // Handle #include directives
-      const includeMatch = line.trimEnd().match(/^#include\s+(\S.*)$/);
+      const includeMatch = line.text.trimEnd().match(/^#include\s+(\S.*)$/);
       if (includeMatch) {
         let includePath = includeMatch[1];
         if (!path.isAbsolute(includePath!)) {
@@ -175,7 +206,7 @@ class TycoLexer {
         lexer.process();
         for (const [typeName, attrDefaults] of lexer.defaults.entries()) {
           if (this.defaults.has(typeName)) {
-            throw new Error(`This should not happen: ${typeName} in defaults`);
+            raiseParseError(`This should not happen: ${typeName} in defaults`, line);
           }
           this.defaults.set(typeName, new Map(attrDefaults));
         }
@@ -183,14 +214,14 @@ class TycoLexer {
       }
       
       // Handle global schema
-      const globalMatch = line.match(TycoLexer.GLOBAL_SCHEMA_REGEX);
+      const globalMatch = line.text.match(TycoLexer.GLOBAL_SCHEMA_REGEX);
       if (globalMatch) {
         this.loadGlobal(line, globalMatch);
         continue;
       }
       
       // Handle struct blocks
-      const structMatch = line.match(TycoLexer.STRUCT_BLOCK_REGEX);
+      const structMatch = line.text.match(TycoLexer.STRUCT_BLOCK_REGEX);
       if (structMatch) {
         const typeName = structMatch[1];
         if (!this.context.structs.has(typeName!)) {
@@ -207,11 +238,11 @@ class TycoLexer {
         continue;
       }
       
-      throw new Error(`Malformatted config file: ${line}`);
+      raiseParseError(`Malformatted config file: ${line.text.trimEnd()}`, line);
     }
   }
 
-  private loadGlobal(line: string, match: RegExpMatchArray): void {
+  private loadGlobal(line: SourceFragment, match: RegExpMatchArray): void {
     const options = match[1];
     const typeName = match[2];
     const arrayFlag = match[3];
@@ -219,12 +250,12 @@ class TycoLexer {
     const isArray = arrayFlag === '[]';
     const isNullable = options === '?';
     
-    const defaultText = line.substring(match[0].length).trimStart();
-    if (!defaultText) {
-      throw new Error('Must provide a value when setting globals');
+    const defaultFragment = line.slice(match[0].length).trimLeadingWhitespace();
+    if (!defaultFragment.text) {
+      raiseParseError('Must provide a value when setting globals', defaultFragment);
     }
     
-    this.lines.unshift(defaultText);
+    this.lines.unshift(defaultFragment);
     const [attr, delim] = this.loadTycoAttr([EOL], '', true, attrName);
     attr.applySchemaInfo({ typeName, attrName, isNullable, isArray });
     this.context.setGlobalAttr(attrName!, attr);
@@ -232,7 +263,7 @@ class TycoLexer {
 
   private loadSchema(struct: TycoStruct): void {
     if (this.defaults.has(struct.typeName)) {
-      throw new Error(`This should not happen: ${struct.typeName} in defaults`);
+      raiseParseError(`This should not happen: ${struct.typeName} in defaults`, this.lines[0] ?? new SourceFragment('', { source: this.path ?? undefined }));
     }
     this.defaults.set(struct.typeName, new Map());
     
@@ -245,10 +276,10 @@ class TycoLexer {
         continue;
       }
       
-      const match = this.lines[0]!.match(TycoLexer.STRUCT_SCHEMA_REGEX);
+      const match = this.lines[0]!.text.match(TycoLexer.STRUCT_SCHEMA_REGEX);
       if (!match) {
         if (/^\s+\w+\s+\w+/.test(content)) {
-          throw new Error(`Schema attribute missing trailing colon: ${content}`);
+          raiseParseError(`Schema attribute missing trailing colon: ${content}`, this.lines[0]);
         }
         break;
       }
@@ -260,7 +291,7 @@ class TycoLexer {
       const attrName = match[4];
       
       if (struct.attrTypes.has(attrName!)) {
-        throw new Error(`Duplicate attribute found for ${attrName} in ${struct.typeName}: ${line}`);
+        raiseParseError(`Duplicate attribute found for ${attrName} in ${struct.typeName}: ${line.text.trimEnd()}`, line);
       }
       
       struct.attrTypes.set(attrName!, typeName!);
@@ -271,14 +302,14 @@ class TycoLexer {
       
       if (options === '*') {
         if (isArray) {
-        throw new Error('Cannot set a primary key on an array');
+          raiseParseError('Cannot set a primary key on an array', line);
         }
         struct.primaryKeys.push(attrName!);
       } else if (options === '?') {
         struct.nullableKeys.add(attrName!);
       }
       
-      const defaultText = line.substring(match[0].length).trimStart();
+      const defaultText = line.slice(match[0].length).trimLeadingWhitespace();
       const defaultContent = stripComments(defaultText);
       if (defaultContent) {
         this.lines.unshift(defaultText);
@@ -291,7 +322,7 @@ class TycoLexer {
   private loadLocalDefaultsAndInstances(struct: TycoStruct): void {
     while (true) {
       if (this.lines.length === 0) break;
-      if (this.lines[0]!.startsWith('#include ')) break;
+      if (this.lines[0]!.text.startsWith('#include ')) break;
       
       const content = stripComments(this.lines[0]!);
       if (!content) {
@@ -299,21 +330,21 @@ class TycoLexer {
         continue;
       }
       
-      if (!/^\s/.test(this.lines[0]!)) break;  // Start of new struct
+      if (!/^\s/.test(this.lines[0]!.text)) break;  // Start of new struct
       
-      if (this.lines[0]!.match(TycoLexer.STRUCT_SCHEMA_REGEX)) {
-        throw new Error('Can not add schema attributes after initial construction');
+      if (this.lines[0]!.text.match(TycoLexer.STRUCT_SCHEMA_REGEX)) {
+        raiseParseError('Can not add schema attributes after initial construction', this.lines[0]);
       }
       
       const line = this.lines.shift()!;
-      const defaultMatch = line.match(TycoLexer.STRUCT_DEFAULTS_REGEX);
+      const defaultMatch = line.text.match(TycoLexer.STRUCT_DEFAULTS_REGEX);
       
       if (defaultMatch) {
         const attrName = defaultMatch[1];
         if (!struct.attrTypes.has(attrName!)) {
-          throw new Error(`Setting invalid default of ${attrName} for ${struct.typeName}`);
+          raiseParseError(`Setting invalid default of ${attrName} for ${struct.typeName}`, line);
         }
-        const defaultText = line.substring(defaultMatch[0].length).trimStart();
+        const defaultText = line.slice(defaultMatch[0].length).trimLeadingWhitespace();
         if (stripComments(defaultText)) {
           this.lines.unshift(defaultText);
           const [attr, delim] = this.loadTycoAttr([EOL], '', true, attrName);
@@ -321,9 +352,9 @@ class TycoLexer {
         } else {
           this.defaults.get(struct.typeName)!.delete(attrName!);
         }
-      } else if (line.match(TycoLexer.STRUCT_INSTANCE_REGEX)) {
-        const match = line.match(TycoLexer.STRUCT_INSTANCE_REGEX)!;
-        this.lines.unshift(line.substring(match[0].length).trimStart());
+      } else if (line.text.match(TycoLexer.STRUCT_INSTANCE_REGEX)) {
+        const match = line.text.match(TycoLexer.STRUCT_INSTANCE_REGEX)!;
+        this.lines.unshift(line.slice(match[0].length).trimLeadingWhitespace());
         const instArgs: any[] = [];
         
         while (true) {
@@ -338,7 +369,7 @@ class TycoLexer {
           if (instContent === '\\') {  // Line continuation
             this.lines.shift();
             if (this.lines.length > 0) {
-              this.lines[0]! = this.lines[0]!.trimStart();
+              this.lines[0]! = this.lines[0]!.trimLeadingWhitespace();
             }
             continue;
           }
@@ -378,42 +409,49 @@ class TycoLexer {
     attrName: string | null
   ): [any, string] {
     if (this.lines.length === 0) {
-      throw new Error('Syntax error: no content found');
+      raiseParseError('Syntax error: no content found', null, { source: this.path ?? undefined });
     }
     
+    const currentLine = this.lines[0]!;
+    
     // Check for field name with colon
-    const colonMatch = this.lines[0]!.match(new RegExp(`^${TycoLexer.IRE}\\s*:\\s*`));
+    const colonMatch = currentLine.text.match(new RegExp(`^${TycoLexer.IRE}\\s*:\\s*`));
     if (colonMatch) {
       if (attrName !== null) {
-        throw new Error(`Colon : found in content - enclose in quotes: ${colonMatch[1]}`);
+        raiseParseError(`Colon : found in content - enclose in quotes: ${colonMatch[1]}`, currentLine.slice(colonMatch.index ?? 0));
       }
       attrName = colonMatch[1]!;
-      this.lines[0]! = this.lines[0]!.substring(colonMatch[0].length);
+      this.lines[0]! = currentLine.slice(colonMatch[0].length);
       // Pass the computed sets, not recomputing them
       return this.loadTycoAttrWithSets(goodDelimSet, badDelimSet, popEmptyLines, attrName);
     }
     
-    const ch = this.lines[0]![0];
+    const ch = this.lines[0]!.text[0];
     let attr: any;
     let delim: string;
     
     if (ch === '[') {  // Inline array
-      this.lines[0]! = this.lines[0]!.substring(1);
+      const arrayFragment = this.lines[0]!;
+      this.lines[0]! = this.lines[0]!.slice(1);
       const content = this.loadArray(']');
       attr = new TycoArray(this.context, content);
+      attr.fragment = arrayFragment;
       delim = this.stripNextDelim(goodDelimSet);
     } else if (/\w/.test(ch!)) {  // Possible inline instance/reference
-      const instMatch = this.lines[0]!.match(/^(\w+)\(/);
+      const instMatch = this.lines[0]!.text.match(/^(\w+)\(/);
       if (instMatch) {
         const typeName = instMatch[1];
-        this.lines[0]! = this.lines[0]!.substring(instMatch[0].length);
+        const invocationFragment = this.lines[0]!;
+        this.lines[0]! = this.lines[0]!.slice(instMatch[0].length);
         const instArgs = this.loadArray(')');
         
         if (!this.context.structs.has(typeName!) || this.context.structs.get(typeName!)!.primaryKeys.length > 0) {
           attr = new TycoReference(this.context, instArgs, typeName!);
+          attr.fragment = invocationFragment;
         } else {
           const defaultKwargs = this.defaults.get(typeName!) || new Map();
           attr = this.context.structs.get(typeName!)!.createInlineInstance(instArgs, defaultKwargs);
+          attr.fragment = invocationFragment;
         }
         delim = this.stripNextDelim(goodDelimSet);
       } else {
@@ -421,20 +459,27 @@ class TycoLexer {
       }
     } else if (ch === '"' || ch === "'") {  // Quoted string
       const triple = ch.repeat(3);
-      if (this.lines[0]!.startsWith(triple)) {
+      if (this.lines[0]!.text.startsWith(triple)) {
         const quotedString = this.loadTripleString(triple);
-        attr = new TycoValue(this.context, quotedString);
+        attr = new TycoValue(this.context, quotedString.text);
+        attr.fragment = quotedString.fragment;
       } else {
         const quotedString = this.loadSingleString(ch);
-        attr = new TycoValue(this.context, quotedString);
+        attr = new TycoValue(this.context, quotedString.text);
+        attr.fragment = quotedString.fragment;
       }
       delim = this.stripNextDelim(goodDelimSet);
     } else {
       [attr, delim] = this.stripNextAttrAndDelim(goodDelimSet, badDelimSet);
     }
     
-    this.lines[0]! = this.lines[0]!.replace(/^[ \t]+/, '');  // Don't strip newlines
-    if (popEmptyLines && !this.lines[0]!) {
+    const remainingLine = this.lines[0];
+    if (remainingLine) {
+      this.lines[0]! = remainingLine.trimLeadingSpacesAndTabs();
+      if (popEmptyLines && !this.lines[0]!.text) {
+        this.lines.shift();
+      }
+    } else if (popEmptyLines) {
       this.lines.shift();
     }
     
@@ -444,39 +489,49 @@ class TycoLexer {
 
   private stripNextDelim(goodDelim: Set<string>): string {
     const delimRegex = new RegExp(`^(${[...goodDelim].map(d => d.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`);
-    const match = this.lines[0]!.match(delimRegex);
+    const currentLine = this.lines[0];
+    if (!currentLine) {
+      raiseParseError(`Should have found next delimiter ${[...goodDelim]}`, null, { source: this.path ?? undefined });
+    }
+    const match = currentLine.text.match(delimRegex);
     
     if (!match) {
-      if (goodDelim.has(EOL) && !stripComments(this.lines[0]!)) {
-        this.lines[0]! = '';
+      if (goodDelim.has(EOL) && !stripComments(currentLine)) {
+        this.lines[0]! = currentLine.slice(currentLine.text.length);
         return EOL;
       }
-      throw new Error(`Should have found next delimiter ${[...goodDelim]}: ${this.lines[0]!}`);
+      raiseParseError(`Should have found next delimiter ${[...goodDelim]}: ${currentLine.text.trimEnd()}`, currentLine);
     }
     
     const delim = match[1]!;
-    this.lines[0]! = this.lines[0]!.substring(match[0].length);
+    this.lines[0]! = currentLine.slice(match[0].length);
     return delim;
   }
 
   private stripNextAttrAndDelim(goodDelim: Set<string>, badDelim: Set<string>): [TycoValue, string] {
-    const allContent = stripComments(this.lines[0]!) + EOL;
+    const currentLine = this.lines[0];
+    if (!currentLine) {
+      raiseParseError('Unexpected end of content', null, { source: this.path ?? undefined });
+    }
+    const allContent = stripComments(currentLine) + EOL;
     const allDelim = [...goodDelim, ...badDelim];
     const delimRegex = new RegExp(allDelim.map(d => d.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'));
     const match = allContent.match(delimRegex);
     
     if (!match || match.index === undefined) {
-      throw new Error(`Should have found some delimiter ${allDelim}: ${this.lines[0]!}`);
+      raiseParseError(`Should have found some delimiter ${allDelim}: ${currentLine.text.trimEnd()}`, currentLine);
     }
     
     const delim = match[0];
     if (badDelim.has(delim)) {
-      throw new Error(`Bad delim: ${delim}`);
+      raiseParseError(`Bad delim: ${delim}`, currentLine.slice(match.index));
     }
     
     const text = allContent.substring(0, match.index);
     const attr = new TycoValue(this.context, text);
-    this.lines[0]! = this.lines[0]!.substring(match.index + delim.length);
+    const fragmentLength = Math.min(match.index, currentLine.text.length);
+    attr.fragment = currentLine.slice(0, fragmentLength);
+    this.lines[0]! = currentLine.slice(match.index + delim.length);
     return [attr, delim];
   }
 
@@ -487,7 +542,7 @@ class TycoLexer {
     
     while (true) {
       if (this.lines.length === 0) {
-        throw new Error(`Could not find ${closingChar}`);
+        raiseParseError(`Could not find ${closingChar}`, null, { source: this.path ?? undefined });
       }
       
       if (!stripComments(this.lines[0]!)) {
@@ -495,8 +550,8 @@ class TycoLexer {
         continue;
       }
       
-      if (this.lines[0]!.startsWith(closingChar)) {
-        this.lines[0]! = this.lines[0]!.substring(1);
+      if (this.lines[0]!.text.startsWith(closingChar)) {
+        this.lines[0]! = this.lines[0]!.slice(1);
         break;
       }
       
@@ -509,30 +564,31 @@ class TycoLexer {
     return array;
   }
 
-  private loadTripleString(triple: string): string {
+  private loadTripleString(triple: string): { text: string; fragment: SourceFragment | null } {
     const isLiteral = triple === "'''";
     let start = 3;
     const allContents: string[] = [];
+    const fragment = this.lines[0] ?? null;
     
     while (true) {
       if (this.lines.length === 0) {
-        throw new Error('Unclosed triple quote');
+        raiseParseError('Unclosed triple quote', fragment ?? null, { source: this.path ?? undefined });
       }
       
       const line = this.lines.shift()!;
-      const end = line.indexOf(triple, start);
+      const end = line.text.indexOf(triple, start);
       
       if (end !== -1) {
         const endIdx = end + 3;
-        const content = line.substring(0, endIdx);
-        let remainder = line.substring(endIdx);
-        allContents.push(content);
+        const contentFragment = line.slice(0, endIdx);
+        let remainder = line.slice(endIdx);
+        allContents.push(contentFragment.text);
         
         // Edge case: there can be a max of 2 additional quotes
         for (let i = 0; i < 2; i++) {
-          if (remainder.startsWith(triple![0]!)) {
+          if (remainder.text.startsWith(triple![0]!)) {
             allContents[allContents.length - 1]! += triple![0]!;
-            remainder = remainder.substring(1);
+            remainder = remainder.slice(1);
           } else {
             break;
           }
@@ -541,19 +597,19 @@ class TycoLexer {
         this.lines.unshift(remainder);
         break;
       } else {
-        if (!isLiteral && line.endsWith('\\' + EOL)) {
-          let trimmedLine = line.substring(0, line.length - (1 + EOL.length));
+        if (!isLiteral && line.text.endsWith('\\' + EOL)) {
+          const trimmedLine = line.text.substring(0, line.text.length - (1 + EOL.length));
           allContents.push(trimmedLine);
           while (this.lines.length > 0) {
-            this.lines[0]! = this.lines[0]!.trimStart();
-            if (!this.lines[0]!) {
+            this.lines[0]! = this.lines[0]!.trimLeadingWhitespace();
+            if (!this.lines[0]!.text) {
               this.lines.shift();
             } else {
               break;
             }
           }
         } else {
-          allContents.push(line);
+          allContents.push(line.text);
         }
       }
       
@@ -563,36 +619,37 @@ class TycoLexer {
     const finalContent = allContents.join('');
     for (const char of finalContent) {
       if (ILLEGAL_STR_CHARS_MULTILINE.has(char)) {
-        throw new Error(`Invalid characters found in literal multiline string: ${char}`);
+        raiseParseError(`Invalid characters found in literal multiline string: ${char}`, null, { source: this.path ?? undefined });
       }
     }
     
-    return finalContent;
+    return { text: finalContent, fragment };
   }
 
-  private loadSingleString(ch: string): string {
+  private loadSingleString(ch: string): { text: string; fragment: SourceFragment | null } {
     const isLiteral = ch === "'";
     let start = 1;
     const line = this.lines.shift()!;
+    const fragment = line;
     
     while (true) {
-      const end = line.indexOf(ch, start);
+      const end = line.text.indexOf(ch, start);
       if (end === -1) {
-        throw new Error(`Unclosed single-line string for ${ch}: ${line}`);
+        raiseParseError(`Unclosed single-line string for ${ch}: ${line.text.trimEnd()}`, line);
       }
       
-      if (isLiteral || line[end - 1] !== '\\') {
-        const finalContent = line.substring(0, end + 1);
-        const remainder = line.substring(end + 1);
+      if (isLiteral || line.text[end - 1] !== '\\') {
+        const finalContent = line.text.substring(0, end + 1);
+        const remainder = line.slice(end + 1);
         
         for (const char of finalContent) {
           if (ILLEGAL_STR_CHARS.has(char)) {
-            throw new Error(`Invalid characters found in literal string: ${char}`);
+            raiseParseError(`Invalid characters found in literal string: ${char}`, line.slice(end));
           }
         }
         
         this.lines.unshift(remainder);
-        return finalContent;
+        return { text: finalContent, fragment };
       }
       
       start = end + 1;
@@ -611,7 +668,7 @@ class TycoContext {
 
   setGlobalAttr(attrName: string, attr: any): void {
     if (this.globals.has(attrName!)) {
-      throw new Error(`Duplicate global attribute: ${attrName}`);
+      raiseParseError(`Duplicate global attribute: ${attrName}`, fragmentFrom(attr));
     }
     this.globals.set(attrName!, attr);
   }
@@ -736,7 +793,7 @@ class TycoStruct {
       const attr = instArgs[i];
       if (!attr.attrName) {
         if (kwargsOnly) {
-          throw new Error(`Can not use positional values after keyed values: ${instArgs}`);
+          failWithFragment(attr, `Can not use positional values after keyed values: ${instArgs}`);
         }
         attr.attrName = this.attrNames[i];
       } else {
@@ -755,7 +812,7 @@ class TycoStruct {
     for (const inst of this.instances) {
       const key = this.primaryKeys.map(k => inst.instKwargs.get(k)!.rendered).join('\0');
       if (this.mappedInstances.has(key)) {
-        throw new Error(`${key} already found for ${this.typeName}: ${this.mappedInstances.get(key)}`);
+        failWithFragment(inst, `${key} already found for ${this.typeName}: ${this.mappedInstances.get(key)}`);
       }
       this.mappedInstances.set(key, inst);
     }
@@ -771,7 +828,7 @@ class TycoStruct {
       
       if (!attr.attrName) {
         if (kwargsOnly) {
-          throw new Error(`Can not use positional values after keyed values: ${instArgs}`);
+          failWithFragment(attr, `Can not use positional values after keyed values: ${instArgs}`);
         }
         attrName = this.primaryKeys[i]!;
       } else {
@@ -790,7 +847,8 @@ class TycoStruct {
     
     const key = this.primaryKeys.map(attrName => instKwargs.get(attrName).rendered).join('\0');
     if (!this.mappedInstances.has(key)) {
-      throw new Error(`Unable to find reference of ${this.typeName}(${key})`);
+      const fragment = fragmentFrom(instArgs[0] ?? null);
+      raiseParseError(`Unable to find reference of ${this.typeName}(${key})`, fragment);
     }
     
     return this.mappedInstances.get(key)!;
@@ -810,7 +868,8 @@ class TycoStruct {
           completeKwargs.set(attrName!, val.makeCopy());
         }
       } else {
-        throw new Error(`Invalid attribute ${attrName} for ${this.typeName}`);
+        const fallbackFragment = fragmentFrom(instKwargs.values().next().value ?? null);
+        raiseParseError(`Invalid attribute ${attrName} for ${this.typeName}`, fallbackFragment);
       }
       
       const attr = completeKwargs.get(attrName);
@@ -837,6 +896,7 @@ class TycoInstance {
   isNullable: boolean | null = null;
   isArray: boolean | null = null;
   parent: any = null;
+  fragment: SourceFragment | null = null;
 
   constructor(context: TycoContext, typeName: string, instKwargs: Map<string, any>) {
     this.context = context;
@@ -849,18 +909,20 @@ class TycoInstance {
     for (const [a, i] of this.instKwargs.entries()) {
       instKwargs.set(a, i.makeCopy());
     }
-    return new TycoInstance(this.context, this.typeName, instKwargs);
+    const copy = new TycoInstance(this.context, this.typeName, instKwargs);
+    copy.fragment = this.fragment;
+    return copy;
   }
 
   applySchemaInfo(kwargs: any): void {
     for (const [attr, val] of Object.entries(kwargs)) {
       if (attr === 'typeName' && this.typeName !== val) {
-        throw new Error(`Expected ${this.typeName} for ${this.parent}.${this.attrName} and instead have ${this}`);
+        failWithFragment(this, `Expected ${this.typeName} for ${this.parent}.${this.attrName} and instead have ${this}`);
       }
       (this as any)[attr] = val;
     }
     if (this.isArray === true) {
-      throw new Error(`Expected array for ${this.parent}.${this.attrName}, instead have ${this}`);
+      failWithFragment(this, `Expected array for ${this.parent}.${this.attrName}, instead have ${this}`);
     }
   }
 
@@ -931,6 +993,7 @@ class TycoReference {
   isArray: boolean | null = null;
   parent: any = null;
   rendered: any = UNRENDERED;
+  fragment: SourceFragment | null = null;
 
   constructor(context: TycoContext, instArgs: any[], typeName: string) {
     this.context = context;
@@ -940,18 +1003,20 @@ class TycoReference {
 
   makeCopy(): TycoReference {
     const instArgs = this.instArgs.map(i => i.makeCopy());
-    return new TycoReference(this.context, instArgs, this.typeName);
+    const copy = new TycoReference(this.context, instArgs, this.typeName);
+    copy.fragment = this.fragment;
+    return copy;
   }
 
   applySchemaInfo(kwargs: any): void {
     for (const [attr, val] of Object.entries(kwargs)) {
       if (attr === 'typeName' && this.typeName !== val) {
-        throw new Error(`Expected ${this.typeName} for ${this.parent}.${this.attrName} and instead have ${this}`);
+        failWithFragment(this, `Expected ${this.typeName} for ${this.parent}.${this.attrName} and instead have ${this}`);
       }
       (this as any)[attr] = val;
     }
     if (this.isArray === true) {
-      throw new Error(`Expected array for ${this.parent}.${this.attrName}, instead have ${this}`);
+      failWithFragment(this, `Expected array for ${this.parent}.${this.attrName}, instead have ${this}`);
     }
   }
 
@@ -965,10 +1030,10 @@ class TycoReference {
 
   renderReferences(): void {
     if (this.rendered !== UNRENDERED) {
-      throw new Error(`Rendered multiple times ${this}`);
+      failWithFragment(this, `Rendered multiple times ${this}`);
     }
     if (!this.context.structs.has(this.typeName)) {
-      throw new Error(`Bad type name for reference: ${this.typeName} ${this.instArgs}`);
+      failWithFragment(this, `Bad type name for reference: ${this.typeName} ${this.instArgs}`);
     }
     const struct = this.context.structs.get(this.typeName)!;
     this.rendered = struct.loadReference(this.instArgs);
@@ -990,7 +1055,7 @@ const referenceHandler = {
       return (target as any)[prop];
     }
     if (target.rendered === UNRENDERED) {
-      throw new Error('Reference not yet rendered');
+      failWithFragment(target, 'Reference not yet rendered');
     }
     return target.rendered.instKwargs.get(prop);
   }
@@ -1008,6 +1073,7 @@ class TycoArray {
   isNullable: boolean | null = null;
   isArray: boolean | null = null;
   parent: any = null;
+  fragment: SourceFragment | null = null;
 
   constructor(context: TycoContext, content: any[]) {
     this.context = context;
@@ -1031,7 +1097,7 @@ class TycoArray {
     }
     
     if (this.isArray === false) {
-      throw new Error(`Schema for ${this.parent}.${this.attrName} needs to indicate array with []`);
+      failWithFragment(this, `Schema for ${this.parent}.${this.attrName} needs to indicate array with []`);
     }
   }
 
@@ -1061,7 +1127,9 @@ class TycoArray {
   }
 
   makeCopy(): TycoArray {
-    return new TycoArray(this.context, this.content.map(i => i.makeCopy()));
+    const copy = new TycoArray(this.context, this.content.map(i => i.makeCopy()));
+    copy.fragment = this.fragment;
+    return copy;
   }
 
   get rendered(): any[] {
@@ -1090,6 +1158,7 @@ class TycoValue {
   parent: any = null;
   isLiteralStr = false;
   rendered: any = UNRENDERED;
+  fragment: SourceFragment | null = null;
 
   constructor(context: TycoContext, content: string) {
     this.context = context;
@@ -1102,6 +1171,7 @@ class TycoValue {
     attr.attrName = this.attrName;
     attr.isNullable = this.isNullable;
     attr.isArray = this.isArray;
+    attr.fragment = this.fragment;
     return attr;
   }
 
@@ -1111,11 +1181,11 @@ class TycoValue {
     }
     
     if (this.isArray === true && !(this.isNullable === true && this.content === 'null')) {
-      throw new Error(`Array expected for ${this.parent}.${this.attrName}: ${this}`);
+      failWithFragment(this, `Array expected for ${this.parent}.${this.attrName}: ${this}`);
     }
     
     if (this.typeName !== null && !TycoValue.BASE_TYPES.has(this.typeName)) {
-      throw new Error(`${this.typeName} expected for ${this.content}, likely needs ${this.typeName}(${this.content})`);
+      failWithFragment(this, `${this.typeName} expected for ${this.content}, likely needs ${this.typeName}(${this.content})`);
     }
   }
 
@@ -1125,7 +1195,7 @@ class TycoValue {
 
   renderBaseContent(): void {
     if (this.typeName === null || this.attrName === null || this.isNullable === null || this.isArray === null) {
-      throw new Error(`Attributes not set ${this.attrName}: ${this}`);
+      failWithFragment(this, `Attributes not set ${this.attrName}: ${this}`);
     }
     
     let content = this.content;
@@ -1172,14 +1242,14 @@ class TycoValue {
       rendered = parseFloat(content);
     } else if (this.typeName === 'decimal') {
       rendered = parseFloat(content);  // JavaScript doesn't have built-in Decimal
-    } else if (this.typeName === 'bool') {
-      if (content === 'true') {
-        rendered = true;
-      } else if (content === 'false') {
-        rendered = false;
-      } else {
-        throw new Error(`Boolean ${this.attrName} for ${this.parent} not in (true, false): ${content}`);
-      }
+      } else if (this.typeName === 'bool') {
+        if (content === 'true') {
+          rendered = true;
+        } else if (content === 'false') {
+          rendered = false;
+        } else {
+          failWithFragment(this, `Boolean ${this.attrName} for ${this.parent} not in (true, false): ${content}`);
+        }
     } else if (this.typeName === 'date') {
       rendered = content;  // Store as string for JSON compatibility
     } else if (this.typeName === 'time') {
@@ -1187,7 +1257,7 @@ class TycoValue {
     } else if (this.typeName === 'datetime') {
       rendered = normalizeDateTimeLiteral(content);
     } else {
-      throw new Error(`Unknown type of ${this.typeName}`);
+      failWithFragment(this, `Unknown type of ${this.typeName}`);
     }
     
     this.rendered = rendered;
@@ -1216,7 +1286,7 @@ class TycoValue {
         while (varPath.startsWith('.')) {
           obj = obj.parent;
           if (obj === null) {
-            throw new Error('Traversing parents hit base instance');
+            failWithFragment(this, 'Traversing parents hit base instance');
           }
           varPath = varPath.substring(1);
         }
@@ -1231,7 +1301,7 @@ class TycoValue {
             obj = obj.get(attr);
           } else if (obj instanceof TycoReference) {
             if (obj.rendered === UNRENDERED) {
-              throw new Error(`Reference ${obj.typeName} not resolved for template access`);
+              failWithFragment(obj, `Reference ${obj.typeName} not resolved for template access`);
             }
             obj = obj.rendered.instKwargs.get(attr);
           } else if (obj.instKwargs) {
@@ -1239,7 +1309,7 @@ class TycoValue {
           } else if (i === 0 && attr === 'global') {
             obj = this.context.globals;
           } else {
-            throw new Error(`Cannot access ${attr}`);
+            failWithFragment(this, `Cannot access ${attr}`);
           }
         } catch (e) {
           if (i === 0 && attr === 'global') {
@@ -1251,7 +1321,7 @@ class TycoValue {
       }
       
       if (obj.typeName && !['str', 'int'].includes(obj.typeName)) {
-        throw new Error(`Can not templatize objects other than strings or ints: ${obj} (${this})`);
+        failWithFragment(this, `Can not templatize objects other than strings or ints: ${obj} (${this})`);
       }
       
       return String(obj.rendered);
@@ -1291,8 +1361,8 @@ export class TycoParser {
 
   public parseContent(content: string): any {
     const context = new TycoContext();
-    const lines = content.split(/\r?\n/).map(line => (line.endsWith('\n') ? line : `${line}${EOL}`));
-    const lexer = new TycoLexer(context, lines);
+    const fragments = coerceContentToFragments(content);
+    const lexer = new TycoLexer(context, fragments);
     lexer.process();
     context.renderContent();
     this.context = context;
@@ -1310,7 +1380,7 @@ export class TycoParser {
 
   public getContext(): TycoContext {
     if (!this.context) {
-      throw new Error('Parser context not initialized. Call parseContent or parseFile first.');
+      throw new TycoError('Parser context not initialized. Call parseContent or parseFile first.');
     }
     return this.context;
   }
