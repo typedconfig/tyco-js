@@ -30,21 +30,26 @@ npm install tyco
 ### Basic Usage
 
 ```javascript
-const { load, loads } = require('tyco');
+const { load } = require('tyco');
 
-// Parse from file
-const config = load('config.tyco');
+// Parse a Tyco configuration file
+const context = load('config.tyco');
 
-// Parse from string
-const config = loads(`
-str environment: "production"
-int port: 8080
-bool debug: false
-`);
+// Access global configuration values
+const globals = context.getGlobals();
+const environment = globals.environment;
+const debug = globals.debug;
+const timeout = globals.timeout;
 
-console.log(config.environment); // "production"
-console.log(config.port);        // 8080
-console.log(config.debug);       // false
+// Get all instances as objects
+const objects = context.getObjects();
+const databases = objects['Database']; // Array of Database instances
+const servers = objects['Server'];     // Array of Server instances
+
+// Access individual instance fields
+const primaryDb = databases[0];
+const dbHost = primaryDb.host;
+const dbPort = primaryDb.port;
 ```
 
 ### TypeScript Usage
