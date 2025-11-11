@@ -28,30 +28,64 @@ npm install tyco
 
 ## Quick Start
 
-This package includes a ready-to-use example Tyco file at:
-
-  examples/basic.tyco
-
-([View on GitHub](https://github.com/typedconfig/tyco-js/blob/main/examples/basic.tyco))
-
-You can load and parse this file using the JavaScript Tyco API. Example usage:
+Every binding includes the canonical sample under `tyco/example.tyco`
+([view on GitHub](https://github.com/typedconfig/tyco-js/blob/main/tyco/example.tyco)).
+Load it to mirror the Python README example:
 
 ```javascript
 const { load } = require('tyco');
 
-// Parse the bundled example.tyco file
-const context = load('examples/basic.tyco');
+const config = load('tyco/example.tyco');
 
-// Access global configuration values
-const globals = context.getGlobals();
-const environment = globals.environment;
-const debug = globals.debug;
-const timeout = globals.timeout;
+const environment = config.environment;
+const debug = config.debug;
+const timeout = config.timeout;
 console.log(`env=${environment} debug=${debug} timeout=${timeout}`);
-// ... access objects, etc ...
+
+const databases = config.Database;
+const servers = config.Server;
+const primaryDb = databases[0];
+console.log(`primary database -> ${primaryDb.host}:${primaryDb.port}`);
+
+const jsonData = JSON.stringify(config, null, 2);
 ```
 
-See the [examples/basic.tyco](https://github.com/typedconfig/tyco-js/blob/main/examples/basic.tyco) file for the full configuration example.
+### Example Tyco File
+
+```
+tyco/example.tyco
+```
+
+```tyco
+# Global configuration with type annotations
+str environment: production
+bool debug: false
+int timeout: 30
+
+# Database configuration struct
+Database:
+ *str name:           # Primary key field (*)
+  str host:
+  int port:
+  str connection_string:
+  # Instances
+  - primary, localhost,    5432, "postgresql://localhost:5432/myapp"
+  - replica, replica-host, 5432, "postgresql://replica-host:5432/myapp"
+
+# Server configuration struct  
+Server:
+ *str name:           # Primary key for referencing
+  int port:
+  str host:
+  ?str description:   # Nullable field (?) - can be null
+  # Server instances
+  - web1,    8080, web1.example.com,    description: "Primary web server"
+  - api1,    3000, api1.example.com,    description: null
+  - worker1, 9000, worker1.example.com, description: "Worker number 1"
+
+# Feature flags array
+str[] features: [auth, analytics, caching]
+```
 
 ### TypeScript Usage
 
