@@ -25,32 +25,33 @@ Tyco is a configuration language designed for complex, structured configurations
 npm install tyco
 ```
 
+
 ## Quick Start
 
-### Basic Usage
+This package includes a ready-to-use example Tyco file at:
+
+  examples/basic.tyco
+
+([View on GitHub](https://github.com/typedconfig/tyco-js/blob/main/examples/basic.tyco))
+
+You can load and parse this file using the JavaScript Tyco API. Example usage:
 
 ```javascript
 const { load } = require('tyco');
 
-// Parse a Tyco configuration file
-const context = load('config.tyco');
+// Parse the bundled example.tyco file
+const context = load('examples/basic.tyco');
 
 // Access global configuration values
 const globals = context.getGlobals();
 const environment = globals.environment;
 const debug = globals.debug;
 const timeout = globals.timeout;
-
-// Get all instances as objects
-const objects = context.getObjects();
-const databases = objects['Database']; // Array of Database instances
-const servers = objects['Server'];     // Array of Server instances
-
-// Access individual instance fields
-const primaryDb = databases[0];
-const dbHost = primaryDb.host;
-const dbPort = primaryDb.port;
+console.log(`env=${environment} debug=${debug} timeout=${timeout}`);
+// ... access objects, etc ...
 ```
+
+See the [examples/basic.tyco](https://github.com/typedconfig/tyco-js/blob/main/examples/basic.tyco) file for the full configuration example.
 
 ### TypeScript Usage
 
