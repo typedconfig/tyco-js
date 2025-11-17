@@ -755,6 +755,29 @@ class TycoContext {
     
     return jsonContent;
   }
+
+  toObject(): any {
+    const result: Record<string, any> = {};
+
+    for (const [name, attr] of this.globals.entries()) {
+      result[name] = attr.toJSON();
+    }
+
+    for (const [typeName, struct] of this.structs.entries()) {
+      if (struct.primaryKeys.length === 0) {
+        continue;
+      }
+      result[typeName] = struct.instances.map(instance => {
+        const entry: Record<string, any> = {};
+        for (const [fieldName, value] of instance.instKwargs.entries()) {
+          entry[fieldName] = value.toJSON();
+        }
+        return entry;
+      });
+    }
+
+    return result;
+  }
 }
 
 // ============================================================================
@@ -1366,7 +1389,7 @@ export class TycoParser {
     lexer.process();
     context.renderContent();
     this.context = context;
-    return context.toJSON();
+    return context.toObject();
   }
 
   public parseFile(filePath: string): any {
@@ -1375,7 +1398,7 @@ export class TycoParser {
     lexer.process();
     context.renderContent();
     this.context = context;
-    return context.toJSON();
+    return context.toObject();
   }
 
   public getContext(): TycoContext {
