@@ -156,10 +156,11 @@ function failWithFragment(target: { fragment?: SourceFragment | null; parent?: a
 
 class TycoLexer {
   private static IRE = '((?!\\d)\\w+)';  // identifier regex
-  private static GLOBAL_SCHEMA_REGEX = new RegExp(`^([?])?${TycoLexer.IRE}(\\[\\])?\\s+${TycoLexer.IRE}\\s*:`);
+  private static ATTR_IRE = '((?!\\d)[\\w\\.]+)';
+  private static GLOBAL_SCHEMA_REGEX = new RegExp(`^([?])?${TycoLexer.IRE}(\\[\\])?\\s+${TycoLexer.ATTR_IRE}\\s*:`);
   private static STRUCT_BLOCK_REGEX = new RegExp(`^${TycoLexer.IRE}:`);
-  private static STRUCT_SCHEMA_REGEX = new RegExp(`^\\s+([*?])?${TycoLexer.IRE}(\\[\\])?\\s+${TycoLexer.IRE}\\s*:`);
-  private static STRUCT_DEFAULTS_REGEX = new RegExp(`^\\s+${TycoLexer.IRE}\\s*:`);
+  private static STRUCT_SCHEMA_REGEX = new RegExp(`^\\s+([*?])?${TycoLexer.IRE}(\\[\\])?\\s+${TycoLexer.ATTR_IRE}\\s*:`);
+  private static STRUCT_DEFAULTS_REGEX = new RegExp(`^\\s+${TycoLexer.ATTR_IRE}\\s*:`);
   private static STRUCT_INSTANCE_REGEX = /^\s+-/;
 
   private context: TycoContext;
@@ -415,7 +416,7 @@ class TycoLexer {
     const currentLine = this.lines[0]!;
     
     // Check for field name with colon
-    const colonMatch = currentLine.text.match(new RegExp(`^${TycoLexer.IRE}\\s*:\\s*`));
+    const colonMatch = currentLine.text.match(new RegExp(`^${TycoLexer.ATTR_IRE}\\s*:\\s*`));
     if (colonMatch) {
       if (attrName !== null) {
         raiseParseError(`Colon : found in content - enclose in quotes: ${colonMatch[1]}`, currentLine.slice(colonMatch.index ?? 0));
@@ -1300,6 +1301,22 @@ class TycoValue {
     }
     
     const templateRender = (match: string, templateVar: string): string => {
+      const tryGetAttr = (target: any, attr: string): any | undefined => {
+        if (target instanceof Map) {
+          return target.has(attr) ? target.get(attr) : undefined;
+        }
+        if (target instanceof TycoReference) {
+          if (target.rendered === UNRENDERED) {
+            failWithFragment(target, `Reference ${target.typeName} not resolved for template access`);
+          }
+          return target.rendered.instKwargs.get(attr);
+        }
+        if (target && target.instKwargs instanceof Map) {
+          return target.instKwargs.get(attr);
+        }
+        return undefined;
+      };
+
       let obj: any = this.parent;
       let varPath = templateVar;
       
@@ -1316,31 +1333,33 @@ class TycoValue {
       }
       
       // Traverse the path
-      const parts = varPath.split('.');
-      for (let i = 0; i < parts.length; i++) {
-        const attr = parts[i];
-        try {
-          if (obj instanceof Map) {
-            obj = obj.get(attr);
-          } else if (obj instanceof TycoReference) {
-            if (obj.rendered === UNRENDERED) {
-              failWithFragment(obj, `Reference ${obj.typeName} not resolved for template access`);
-            }
-            obj = obj.rendered.instKwargs.get(attr);
-          } else if (obj.instKwargs) {
-            obj = obj.instKwargs.get(attr);
-          } else if (i === 0 && attr === 'global') {
-            obj = this.context.globals;
-          } else {
-            failWithFragment(this, `Cannot access ${attr}`);
-          }
-        } catch (e) {
-          if (i === 0 && attr === 'global') {
-            obj = this.context.globals;
-          } else {
-            throw e;
-          }
+      const parts = varPath ? varPath.split('.') : [];
+      if (parts.length === 0) {
+        failWithFragment(this, 'Empty template content');
+      }
+      const firstSegment = parts.length > 0 ? parts[0]! : '';
+      const queue: string[] = [...parts];
+      while (queue.length > 0) {
+        const attr = queue[0]!;
+        const value = tryGetAttr(obj, attr);
+        if (value !== undefined) {
+          obj = value;
+          queue.shift();
+          continue;
         }
+        if (queue.length > 1) {
+          const first = queue.shift()!;
+          const second = queue.shift()!;
+          const merged = `${first}.${second}`;
+          queue.unshift(merged);
+          continue;
+        }
+        if (attr === 'global' && firstSegment === 'global') {
+          obj = this.context.globals;
+          queue.shift();
+          continue;
+        }
+        failWithFragment(this, `Cannot access ${attr}`);
       }
       
       if (obj.typeName && !['str', 'int'].includes(obj.typeName)) {
