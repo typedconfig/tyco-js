@@ -313,9 +313,16 @@ class TycoLexer {
       const defaultText = line.slice(match[0].length).trimLeadingWhitespace();
       const defaultContent = stripComments(defaultText);
       if (defaultContent) {
-        this.lines.unshift(defaultText);
-        const [attr, delim] = this.loadTycoAttr([EOL], '', true, attrName);
-        this.defaults.get(struct.typeName)!.set(attrName!, attr);
+        if (this.isEnumLiteral(defaultContent)) {
+          this.parseEnumConstraint(defaultText, struct, attrName!, typeName!, options === '?', isArray);
+        } else {
+          struct.removeEnumConstraint(attrName!);
+          this.lines.unshift(defaultText);
+          const [attr, delim] = this.loadTycoAttr([EOL], '', true, attrName);
+          this.defaults.get(struct.typeName)!.set(attrName!, attr);
+        }
+      } else {
+        struct.removeEnumConstraint(attrName!);
       }
     }
   }
@@ -346,12 +353,22 @@ class TycoLexer {
           raiseParseError(`Setting invalid default of ${attrName} for ${struct.typeName}`, line);
         }
         const defaultText = line.slice(defaultMatch[0].length).trimLeadingWhitespace();
-        if (stripComments(defaultText)) {
-          this.lines.unshift(defaultText);
-          const [attr, delim] = this.loadTycoAttr([EOL], '', true, attrName);
-          this.defaults.get(struct.typeName)!.set(attrName!, attr);
+        const defaultContent = stripComments(defaultText);
+        const fieldType = struct.attrTypes.get(attrName!)!;
+        const isNullable = struct.nullableKeys.has(attrName!);
+        const isArray = struct.arrayKeys.has(attrName!);
+        if (defaultContent) {
+          if (this.isEnumLiteral(defaultContent)) {
+            this.parseEnumConstraint(defaultText, struct, attrName!, fieldType, isNullable, isArray);
+          } else {
+            struct.removeEnumConstraint(attrName!);
+            this.lines.unshift(defaultText);
+            const [attr, delim] = this.loadTycoAttr([EOL], '', true, attrName);
+            this.defaults.get(struct.typeName)!.set(attrName!, attr);
+          }
         } else {
           this.defaults.get(struct.typeName)!.delete(attrName!);
+          struct.removeEnumConstraint(attrName!);
         }
       } else if (line.text.match(TycoLexer.STRUCT_INSTANCE_REGEX)) {
         const match = line.text.match(TycoLexer.STRUCT_INSTANCE_REGEX)!;
@@ -486,6 +503,46 @@ class TycoLexer {
     
     attr.applySchemaInfo({ attrName });
     return [attr, delim];
+  }
+
+  private isEnumLiteral(content: string): boolean {
+    return content.trimStart().startsWith('(');
+  }
+
+  private parseEnumConstraint(
+    defaultFragment: SourceFragment,
+    struct: TycoStruct,
+    attrName: string,
+    typeName: string,
+    isNullable: boolean,
+    isArray: boolean
+  ): void {
+    if (isArray) {
+      raiseParseError('Enum constraints are only supported on scalar fields', defaultFragment);
+    }
+    const trimmed = defaultFragment.trimLeadingWhitespace();
+    if (!trimmed.text.startsWith('(')) {
+      raiseParseError('Enum declaration must begin with (', trimmed);
+    }
+    const remainder = trimmed.slice(1);
+    this.lines.unshift(remainder);
+    const rawChoices = this.loadArray(')');
+    if (rawChoices.length === 0) {
+      raiseParseError('Enum declaration must contain at least one choice', defaultFragment);
+    }
+    const choices: TycoValue[] = [];
+    for (const choice of rawChoices) {
+      if (choice instanceof TycoValue) {
+        choices.push(choice);
+      } else {
+        const fragment = fragmentFrom(choice);
+        raiseParseError('Enum choices must be primitive values', fragment ?? defaultFragment);
+      }
+    }
+    const enumConstraint = new TycoEnum(this.context, choices, defaultFragment);
+    enumConstraint.ensureChoicesInitialized({ typeName, attrName, isNullable });
+    struct.setEnumConstraint(attrName, enumConstraint);
+    this.defaults.get(struct.typeName)!.delete(attrName);
   }
 
   private stripNextDelim(goodDelim: Set<string>): string {
@@ -792,6 +849,7 @@ class TycoStruct {
   primaryKeys: string[] = [];
   nullableKeys: Set<string> = new Set();
   arrayKeys: Set<string> = new Set();
+  enumConstraints: Map<string, TycoEnum> = new Map();
   instances: TycoInstance[] = [];
   mappedInstances: Map<string, TycoInstance> = new Map();
 
@@ -802,6 +860,18 @@ class TycoStruct {
 
   get attrNames(): string[] {
     return [...this.attrTypes.keys()];
+  }
+
+  setEnumConstraint(attrName: string, constraint: TycoEnum): void {
+    this.enumConstraints.set(attrName, constraint);
+  }
+
+  removeEnumConstraint(attrName: string): void {
+    this.enumConstraints.delete(attrName);
+  }
+
+  getEnumConstraint(attrName: string): TycoEnum | undefined {
+    return this.enumConstraints.get(attrName);
   }
 
   createInstance(instArgs: any[], defaultKwargs: Map<string, any>): void {
@@ -891,6 +961,9 @@ class TycoStruct {
         } else {
           completeKwargs.set(attrName!, val.makeCopy());
         }
+      } else if (this.enumConstraints.has(attrName!)) {
+        const fragment = fragmentFrom(instKwargs.values().next().value ?? null);
+        raiseParseError(`Enum value for ${attrName} must be provided in ${this.typeName}`, fragment);
       } else {
         const fallbackFragment = fragmentFrom(instKwargs.values().next().value ?? null);
         raiseParseError(`Invalid attribute ${attrName} for ${this.typeName}`, fallbackFragment);
@@ -902,6 +975,15 @@ class TycoStruct {
       const isArray = this.arrayKeys.has(attrName);
       
       attr.applySchemaInfo({ typeName, attrName, isNullable, isArray });
+
+      const enumConstraint = this.enumConstraints.get(attrName);
+      if (enumConstraint) {
+        enumConstraint.ensureChoicesInitialized({ typeName, attrName, isNullable });
+        attr.renderBaseContent();
+        if (!enumConstraint.isValid(attr)) {
+          failWithFragment(attr, `${attrName} enum value ${attr.rendered} not in choices ${enumConstraint.describeChoices()}`);
+        }
+      }
     }
     
     return completeKwargs;
@@ -1376,6 +1458,62 @@ class TycoValue {
 
   toJSON(): any {
     return this.rendered;
+  }
+}
+
+class TycoEnum {
+  private context: TycoContext;
+  private elements: TycoValue[];
+  private fragment: SourceFragment | null;
+  private schemaInfo: { typeName: string; attrName: string; isNullable: boolean } | null = null;
+  private initialized = false;
+
+  constructor(context: TycoContext, elements: TycoValue[], fragment: SourceFragment | null = null) {
+    this.context = context;
+    this.elements = elements;
+    this.fragment = fragment;
+  }
+
+  ensureChoicesInitialized(info?: { typeName: string; attrName: string; isNullable: boolean }): void {
+    if (info) {
+      this.schemaInfo = info;
+    }
+    if (this.initialized || !this.schemaInfo) {
+      return;
+    }
+    for (const element of this.elements) {
+      element.applySchemaInfo({
+        typeName: this.schemaInfo.typeName,
+        attrName: this.schemaInfo.attrName,
+        isNullable: this.schemaInfo.isNullable,
+        isArray: false,
+      });
+    }
+    this.initialized = true;
+  }
+
+  renderBaseContent(): void {
+    this.ensureChoicesInitialized();
+    for (const element of this.elements) {
+      element.renderBaseContent();
+    }
+  }
+
+  isValid(value: TycoValue): boolean {
+    this.renderBaseContent();
+    value.renderBaseContent();
+    for (const choice of this.elements) {
+      if (choice.rendered === value.rendered) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  describeChoices(): string {
+    this.renderBaseContent();
+    const labels = this.elements.map(choice => choice.rendered === UNRENDERED ? '<unrendered>' : String(choice.rendered));
+    return `(${labels.join(', ')})`;
   }
 }
 

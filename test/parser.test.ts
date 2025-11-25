@@ -184,5 +184,45 @@ Server:
       expect(result.Server[0].description).toBe('Primary web server');
       expect(result.Server[1].description).toBeNull();
     });
+
+    test('should enforce enum choices', () => {
+      const content = `
+Service:
+ *str name:
+  str tier: (primary, backup)
+  str region:
+  - web, primary, us-east-1
+  - api, backup, us-west-2
+`;
+
+      const result = loads(content);
+      expect(result.Service).toHaveLength(2);
+      expect(result.Service[0].tier).toBe('primary');
+      expect(result.Service[1].tier).toBe('backup');
+    });
+
+    test('should require enum values', () => {
+      const content = `
+Service:
+ *str name:
+  str tier: (primary, backup)
+  str region:
+  - web, region: us-east-1
+`;
+
+      expect(() => loads(content)).toThrow(/enum value/i);
+    });
+
+    test('should reject invalid enum selections', () => {
+      const content = `
+Service:
+ *str name:
+  str tier: (primary, backup)
+  str region:
+  - web, canary, us-east-1
+`;
+
+      expect(() => loads(content)).toThrow(/not in choices/i);
+    });
   });
 });
