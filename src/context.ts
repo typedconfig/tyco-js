@@ -2,6 +2,7 @@
  * TycoContext - Main container for parsed Tyco content
  */
 
+import * as fs from 'fs';
 import { TycoGlobalValue, TycoStructSchema, TycoStructInstance, TycoParseResult } from './types';
 
 export class TycoContext {
@@ -103,7 +104,11 @@ export class TycoContext {
     };
   }
 
-  public getResult(): any {
+  public asJson(): TycoParseResult {
+    return this.toJSON();
+  }
+
+  public asObject(): any {
     const result: any = {};
 
     // Add globals to result
@@ -125,6 +130,18 @@ export class TycoContext {
     }
 
     return result;
+  }
+
+  public toObject(): any {
+    return this.asObject();
+  }
+
+  public dumpsJson(indent = 2): string {
+    return JSON.stringify(this.asJson(), null, indent);
+  }
+
+  public dumpJson(filePath: string, indent = 2): void {
+    fs.writeFileSync(filePath, this.dumpsJson(indent));
   }
 }
 

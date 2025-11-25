@@ -814,7 +814,11 @@ class TycoContext {
     return jsonContent;
   }
 
-  toObject(): any {
+  asJson(): any {
+    return this.toJSON();
+  }
+
+  asObject(): any {
     const result: Record<string, any> = {};
 
     for (const [name, attr] of this.globals.entries()) {
@@ -835,6 +839,18 @@ class TycoContext {
     }
 
     return result;
+  }
+
+  toObject(): any {
+    return this.asObject();
+  }
+
+  dumpsJson(indent = 2): string {
+    return JSON.stringify(this.asJson(), null, indent);
+  }
+
+  dumpJson(filePath: string, indent = 2): void {
+    fs.writeFileSync(filePath, this.dumpsJson(indent));
   }
 }
 
@@ -1071,6 +1087,10 @@ class TycoInstance {
       result[a] = i.toJSON();
     }
     return result;
+  }
+
+  toObject(): any {
+    return this.asObject();
   }
 }
 
@@ -1546,7 +1566,7 @@ export class TycoParser {
     lexer.process();
     context.renderContent();
     this.context = context;
-    return context.toObject();
+    return context.asObject();
   }
 
   public parseFile(filePath: string): any {
@@ -1555,7 +1575,7 @@ export class TycoParser {
     lexer.process();
     context.renderContent();
     this.context = context;
-    return context.toObject();
+    return context.asObject();
   }
 
   public getContext(): TycoContext {

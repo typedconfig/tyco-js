@@ -269,17 +269,21 @@ export class TycoInstance {
     }
   }
 
-  public toObject(): any {
+  public asObject(): any {
     const obj: any = {};
     for (const [key, value] of this.fields) {
       if (value instanceof TycoInstance) {
-        obj[key] = value.toObject();
+        obj[key] = value.asObject();
       } else if (Array.isArray(value)) {
-        obj[key] = value.map(v => v instanceof TycoInstance ? v.toObject() : v);
+        obj[key] = value.map(v => v instanceof TycoInstance ? v.asObject() : v);
       } else {
         obj[key] = value;
       }
     }
     return obj;
+  }
+
+  public toObject(): any {
+    return this.asObject();
   }
 }
