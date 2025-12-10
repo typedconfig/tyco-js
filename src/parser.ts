@@ -1089,6 +1089,20 @@ class TycoInstance {
     return result;
   }
 
+  asObject(): any {
+    const result: any = {};
+    for (const [a, i] of this.instKwargs.entries()) {
+      if (typeof (i as any).asObject === 'function') {
+        result[a] = (i as any).asObject();
+      } else if (typeof (i as any).toJSON === 'function') {
+        result[a] = (i as any).toJSON();
+      } else {
+        result[a] = i;
+      }
+    }
+    return result;
+  }
+
   toObject(): any {
     return this.asObject();
   }
