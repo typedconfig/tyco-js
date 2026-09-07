@@ -22,13 +22,13 @@
     "tyco",
     "typed-config"
   ],
-  "author": "Matt Lauria <matt@typedconfig.io>",
+  "author": "Matt Lauria <matt@typedconfig.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/typedconfig/tyco-js.git"
   },
-  "homepage": "https://typedconfig.io",
+  "homepage": "https://typedconfig.com",
   "bugs": {
     "url": "https://github.com/typedconfig/tyco-js/issues"
   },
